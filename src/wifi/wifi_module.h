@@ -74,11 +74,8 @@ private:
     unsigned long lastSendMs_ = 0;
     unsigned long lastUiMs_ = 0;
 
-    static constexpr uint8_t DEAUTH_REASONS[] = {
-        0x01, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0D, 0x0F
-    };
-    static constexpr int DEAUTH_REASON_COUNT =
-        sizeof(DEAUTH_REASONS) / sizeof(DEAUTH_REASONS[0]);
+    static const uint8_t DEAUTH_REASONS[];
+    static const int DEAUTH_REASON_COUNT;
 
     void scanNetworks() {
         auto& d = M5Cardputer.Display;
@@ -272,3 +269,9 @@ private:
                  static_cast<long>(aps_[selectedIdx_].rssi));
     }
 };
+
+const uint8_t WifiModule::DEAUTH_REASONS[] = {
+    0x01, 0x04, 0x06, 0x07, 0x08, 0x0A, 0x0D, 0x0F
+};
+const int WifiModule::DEAUTH_REASON_COUNT =
+    sizeof(WifiModule::DEAUTH_REASONS) / sizeof(WifiModule::DEAUTH_REASONS[0]);
