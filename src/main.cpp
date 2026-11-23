@@ -13,6 +13,49 @@ static WifiModule wifiMod;
 static BleSpamModule bleMod;
 static SettingsModule settingsMod;
 
+static NavInput readCombinedNavInput() {
+    NavInput nav = readNavInput();
+
+    static bool prevSelect = false;
+    static bool prevBack = false;
+
+    bool curSelect = nav.select;
+    bool curBack = nav.back;
+
+    if (M5Cardputer.Keyboard.isPressed()) {
+        auto ks = M5Cardputer.Keyboard.keysState();
+        if (ks.enter) {
+            curSelect = true;
+        }
+        if (ks.del) {
+            curBack = true;
+        }
+        for (char c : ks.word) {
+            if (c == '\r' || c == '\n') {
+                curSelect = true;
+            } else if (c == '`' || c == '\b') {
+                curBack = true;
+            }
+        }
+    }
+
+    if (M5Cardputer.BtnA.isPressed()) {
+        curSelect = true;
+    }
+
+    if (curSelect && !prevSelect) {
+        nav.select = true;
+    }
+    if (curBack && !prevBack) {
+        nav.back = true;
+    }
+
+    prevSelect = curSelect;
+    prevBack = curBack;
+
+    return nav;
+}
+
 void setup() {
     auto cfg = M5.config();
     M5Cardputer.begin(cfg);
@@ -24,7 +67,7 @@ void setup() {
 
 void loop() {
     M5Cardputer.update();
-    NavInput nav = readNavInput();
+    NavInput nav = readCombinedNavInput();
 
     switch (currentScreen) {
         case AppScreen::MAIN_MENU: {
