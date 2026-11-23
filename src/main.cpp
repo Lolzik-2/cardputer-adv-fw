@@ -16,7 +16,7 @@ static SettingsModule settingsMod;
 void setup() {
     auto cfg = M5.config();
     M5Cardputer.begin(cfg);
-    M5Cardputer.Display.setRotation(1);
+    M5Cardputer.Display.setRotation(0);
     M5Cardputer.Display.setBrightness(140);
 
     drawMainMenu(mainIndex);
