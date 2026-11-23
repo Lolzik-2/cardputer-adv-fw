@@ -1,83 +1,71 @@
-#include <M5Cardputer.h>
 #include "main_menu.h"
-#include "ir/ir_module.h"
-#include "wifi/wifi_module.h"
-#include "ble/ble_spam.h"
-#include "settings/settings_module.h"
 
-static AppScreen currentScreen = AppScreen::MAIN_MENU;
-static int mainIndex = 0;
+static const char* MAIN_ITEMS[] = {
+    "Infrared",
+    "Wi-Fi",
+    "BLE Spam",
+    "Settings"
+};
+static constexpr int MAIN_ITEM_COUNT = sizeof(MAIN_ITEMS) / sizeof(MAIN_ITEMS[0]);
 
-static IrModule irMod;
-static WifiModule wifiMod;
-static BleSpamModule bleMod;
-static SettingsModule settingsMod;
+// Навигация без Fn:
+// Вверх: ';' или 'w'
+// Вниз:  '.' или '/' или 's'
+// Выбор: Enter
+// Назад: '`' или Backspace
+NavInput readNavInput() {
+    NavInput nav;
+    auto& kb = M5Cardputer.Keyboard;
 
-void setup() {
-    auto cfg = M5.config();
-    M5Cardputer.begin(cfg);
-    M5Cardputer.Display.setRotation(1);
-    M5Cardputer.Display.setBrightness(140);
-
-    drawMainMenu(mainIndex);
-}
-
-void loop() {
-    M5Cardputer.update();
-    NavInput nav = readNavInput();
-
-    switch (currentScreen) {
-        case AppScreen::MAIN_MENU: {
-            if (nav.up) {
-                mainIndex = (mainIndex - 1 + 4) % 4;
-                drawMainMenu(mainIndex);
-            }
-            if (nav.down) {
-                mainIndex = (mainIndex + 1) % 4;
-                drawMainMenu(mainIndex);
-            }
-            if (nav.select) {
-                if (mainIndex == 0) {
-                    currentScreen = AppScreen::IR_MENU;
-                    irMod.enter();
-                } else if (mainIndex == 1) {
-                    currentScreen = AppScreen::WIFI_MENU;
-                    wifiMod.enter();
-                } else if (mainIndex == 2) {
-                    currentScreen = AppScreen::BLE_MENU;
-                    bleMod.enter();
-                } else if (mainIndex == 3) {
-                    currentScreen = AppScreen::SETTINGS_MENU;
-                    settingsMod.enter();
-                }
-            }
-            break;
-        }
-        case AppScreen::IR_MENU:
-            if (irMod.update(nav)) {
-                currentScreen = AppScreen::MAIN_MENU;
-                drawMainMenu(mainIndex);
-            }
-            break;
-        case AppScreen::WIFI_MENU:
-            if (wifiMod.update(nav)) {
-                currentScreen = AppScreen::MAIN_MENU;
-                drawMainMenu(mainIndex);
-            }
-            break;
-        case AppScreen::BLE_MENU:
-            if (bleMod.update(nav)) {
-                currentScreen = AppScreen::MAIN_MENU;
-                drawMainMenu(mainIndex);
-            }
-            break;
-        case AppScreen::SETTINGS_MENU:
-            if (settingsMod.update(nav)) {
-                currentScreen = AppScreen::MAIN_MENU;
-                drawMainMenu(mainIndex);
-            }
-            break;
+    if (!kb.isChange()) {
+        return nav;
     }
 
-    delay(10);
+    if (kb.isKeyPressed(';') || kb.isKeyPressed('w')) {
+        nav.up = true;
+    }
+    if (kb.isKeyPressed('.') || kb.isKeyPressed('/') || kb.isKeyPressed('s')) {
+        nav.down = true;
+    }
+    if (kb.isKeyPressed('\n') || kb.isKeyPressed('\r')) {
+        nav.select = true;
+    }
+    if (kb.isKeyPressed('`') || kb.isKeyPressed('\b')) {
+        nav.back = true;
+    }
+
+    return nav;
+}
+
+void drawMainMenu(int selectedIndex) {
+    auto& d = M5Cardputer.Display;
+    d.fillScreen(THEME_BG);
+    d.setTextColor(THEME_FG, THEME_BG);
+    d.setTextSize(2);
+
+    // В главном меню без индикатора батареи — только чистый список как на фото
+    const int startY  = 12;
+    const int itemH   = 27;
+    const int gapY    = 4;
+    const int marginX = 10;
+    const int boxW    = d.width() - marginX * 2;
+
+    for (int i = 0; i < MAIN_ITEM_COUNT; ++i) {
+        int y = startY + i * (itemH + gapY);
+        bool selected = (i == selectedIndex);
+
+        if (selected) {
+            d.fillRoundRect(marginX, y, boxW, itemH, 4, THEME_HIGHLIGHT);
+            d.drawRoundRect(marginX, y, boxW, itemH, 4, THEME_BORDER);
+            d.drawRoundRect(marginX + 1, y + 1, boxW - 2, itemH - 2, 3, THEME_BORDER);
+            d.setTextColor(THEME_FG, THEME_HIGHLIGHT);
+        } else {
+            d.drawRoundRect(marginX, y, boxW, itemH, 4, THEME_BORDER);
+            d.setTextColor(THEME_FG, THEME_BG);
+        }
+
+        d.setCursor(marginX + 10, y + 6);
+        d.print(selected ? "> " : "* ");
+        d.print(MAIN_ITEMS[i]);
+    }
 }
