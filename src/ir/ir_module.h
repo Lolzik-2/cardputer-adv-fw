@@ -63,7 +63,7 @@ private:
 
     void initTx() {
         if (!irTxInitialized_) {
-            IrSender.begin(IR_TX_PIN, DISABLE_LED_FEEDBACK);
+            IrSender.begin(IR_TX_PIN, DISABLE_LED_FEEDBACK, 0);
             irTxInitialized_ = true;
         }
     }
